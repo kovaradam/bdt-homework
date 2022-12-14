@@ -1,6 +1,6 @@
 # CTU FEE BDT course homework
 
-Main notebook is located in `notebook/analyze-traffic.py`
+Main script is a Databricks notebook located in `notebook/analyze-traffic.py`
 
 > ## 4 - Differences by direction of travel - to and from Prague
 >
