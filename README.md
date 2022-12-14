@@ -17,7 +17,7 @@ Main script is a Databricks notebook located in `notebook/analyze-traffic.py`
 - Only bus lines from/to Prague are used
 - Only the latest entry per each hour is selected
 
-### Plots
+### Example output plots
 
 Map containing latest bus positions with their direction and delay (red ones are delayed, green ones are on time)
 
