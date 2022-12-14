@@ -18,9 +18,13 @@
 # MAGIC %md
 # MAGIC 
 # MAGIC ## Get data
+# MAGIC 
+# MAGIC - We collect data from the stream each hour
+# MAGIC - There is also memory stream for debugging etc.
 
 # COMMAND ----------
 
+# Start stream write into memory
 
 buses_stream_mem_append = buses_select.writeStream \
         .format("memory")\
@@ -32,7 +36,7 @@ buses_stream_mem_append = buses_select.writeStream \
 # COMMAND ----------
 
 # MAGIC %sql 
-# MAGIC -- Get data from memory
+# MAGIC -- Get data from memory for debugging purposes
 # MAGIC 
 # MAGIC drop table if exists buses;
 # MAGIC 
@@ -41,7 +45,7 @@ buses_stream_mem_append = buses_select.writeStream \
 # COMMAND ----------
 
 # MAGIC %sql 
-# MAGIC Get persisted data
+# MAGIC -- Get persisted data collected over period of time
 # MAGIC 
 # MAGIC drop table if exists buses;
 # MAGIC 
@@ -53,10 +57,18 @@ buses_stream_mem_append = buses_select.writeStream \
 
 # COMMAND ----------
 
+# MAGIC %md 
+# MAGIC ## Data selection
+# MAGIC 
+# MAGIC - Pick only bus lines from/to Prague
+# MAGIC - Then only the latest entry per each hour is selected
+
+# COMMAND ----------
+
 # MAGIC 
 # MAGIC %sql 
 # MAGIC 
-# MAGIC -- Select distinct number and destination combinations
+# MAGIC -- Select distinct line number and destination combinations
 # MAGIC drop table if exists bus_line_destinations;
 # MAGIC create table bus_line_destinations from buses select distinct properties.trip.gtfs.trip_headsign as destination, properties.trip.gtfs.route_short_name as line_number;
 # MAGIC 
@@ -74,23 +86,47 @@ buses_stream_mem_append = buses_select.writeStream \
 
 # COMMAND ----------
 
-# MAGIC %md 
-# MAGIC ## Plot
-
-# COMMAND ----------
-
 # MAGIC %sql
 # MAGIC 
-# MAGIC SELECT 
+# MAGIC drop table if exists bus_data;
+# MAGIC 
+# MAGIC create table bus_data SELECT 
 # MAGIC   cast(geometry.coordinates[0] as double) AS x,
 # MAGIC   cast(geometry.coordinates[1] as double) AS y,
 # MAGIC   properties.trip.origin_route_name as line_number,
 # MAGIC   properties.trip.gtfs.trip_headsign as destination,
 # MAGIC   properties.last_position.delay.actual as delay,
-# MAGIC --   using last dearture as a timestamp
+# MAGIC --   using last departure as a timestamp
 # MAGIC   cast(properties.last_position.origin_timestamp as timestamp) as timestamp,  
 # MAGIC   properties
-# MAGIC FROM prague_bus_lines limit 1350  
+# MAGIC FROM prague_bus_lines ;
+# MAGIC 
+# MAGIC drop table if exists latest_bus_data;
+# MAGIC 
+# MAGIC -- Get latest data
+# MAGIC create table latest_bus_data select *, substring(timestamp, 0, 13) as timestamp_hour from bus_data order by timestamp desc;
+# MAGIC 
+# MAGIC -- Get only the latest bus entry per hour 
+# MAGIC drop table if exists hourly_bus_data;
+# MAGIC create table hourly_bus_data select * from (
+# MAGIC    select *, row_number() over (partition by timestamp_hour, line_number  order by timestamp) as row_number
+# MAGIC    from latest_bus_data
+# MAGIC    ) 
+# MAGIC where row_number = 1 order by timestamp desc; 
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from hourly_bus_data order by timestamp_hour desc
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC 
+# MAGIC ## Plots
+# MAGIC 
+# MAGIC - Map containing latest bus positions with their direction and delay (red ones are delayed, green ones are on time)
+# MAGIC - Bar plots with differences between delays from/to Prague
 
 # COMMAND ----------
 
@@ -103,18 +139,28 @@ import osmnx
 
 custom_filter='["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|road|road_link"]'
 
-# G = osmnx.graph_from_place("Prague, Czechia", custom_filter=custom_filter)
-G = osmnx.graph_from_bbox(12.09,51.06,18.87,48.55,custom_filter=custom_filter)
+G = osmnx.graph_from_place("Prague, Czechia", custom_filter=custom_filter)
+# G = osmnx.graph_from_bbox(12.09,51.06,18.87,48.55,custom_filter=custom_filter)
 
 
 # COMMAND ----------
 
 def rows_by_interval(dataframe, time_from, time_to, selector='timestamp'):
     return dataframe[(dataframe[selector] >= time_from) & (dataframe[selector] < time_to)]
+ 
+def df_len(dataframe):
+    return dataframe.shape[0]
+    
 
 # COMMAND ----------
 
-prague_buses_sql_result = _sqldf
+hourly_prague_buses = _sqldf.toPandas()
+
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC 
+# MAGIC ### Map of Prague with latest bus positions in given hour
 
 # COMMAND ----------
 
@@ -123,19 +169,16 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from matplotlib import widgets
 
-prague_buses_sql_result = _sqldf
-
-now = datetime.now()
-# now = datetime(2022, 12, 11, 20, 41)
-
+# The latest collected entry
+now = datetime(2022, 12, 14, 9, 15)
 
 red, green, gray = '#b90000', '#056805', '#777'
 
-buses = prague_buses_sql_result.toPandas()
+buses = hourly_prague_buses
 
-last_n_hours = 2
+last_n_hours = 3
 for i in range(last_n_hours):    
-    fig, ax = osmnx.plot_graph(G, show=False, close=False,figsize=(20,20), bgcolor='white',edge_color=gray,node_color=gray)
+    fig, ax = osmnx.plot_graph(G, show=False, close=False,figsize=(10,10), bgcolor='white',edge_color=gray,node_color=gray)
     time_to = now - timedelta(hours=i)
     time_from = now - timedelta(hours=i+1)
     
@@ -146,6 +189,8 @@ for i in range(last_n_hours):
     ax.scatter('x', 'y', data=delayed_buses, c=red)
     ax.scatter('x', 'y', data=buses_on_time, c=green)
 
+    ax.set_title(f'Latest bus delay between {time_from.hour}:00 and {time_to.hour}:00')
+    
     buses_in_timeframe.reset_index()
 
     for _, row in buses_in_timeframe.iterrows():    
@@ -158,38 +203,25 @@ for i in range(last_n_hours):
 
 # COMMAND ----------
 
-buses_in = buses[buses['destination'].str.contains('Praha')]
-buses_out = buses[~buses['destination'].str.contains('Praha')]
+# MAGIC %md
+# MAGIC 
+# MAGIC ### Bar plots showing differences between delays of buses heading from/to Prague
 
 # COMMAND ----------
 
+buses = hourly_prague_buses
 
-interval = 4
-plt.figure(figsize=(16, interval*3))
-for i in range(interval):    
-    time_from = now - timedelta(hours=i+1)
-    time_to = now - timedelta(hours=i)
-    time_buses_in = buses_in[(buses_in['timestamp'] >= time_from)&(buses_in['timestamp'] < time_to)]
-    time_buses_out = buses_out[(buses_out['timestamp'] >= time_from)&(buses_out['timestamp'] < time_to)]
-    
-    subplot_idx = i*2
-    plt.subplot(interval, 2, subplot_idx + 1)
-    plt.bar(['Buses to Prague','Buses from Prague'],[len(time_buses_out.index), len(time_buses_in.index)], color='orange')
-    plt.ylabel('Number of buses')
-    plt.title(f"from {time_from.hour} to {time_to.hour}")
-    
-    plt.subplot(interval, 2, subplot_idx + 2)
-    plt.bar(['Buses to Prague','Buses from Prague'],[time_buses_out['delay'].median(),time_buses_in['delay'].median()])
-    plt.ylabel('Delay median [s]')
-
-plt.show()
+buses_in = buses[buses['destination'].str.contains('Praha')]
+buses_out = buses[~buses['destination'].str.contains('Praha')]
 
 # COMMAND ----------
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-hour_range = 12
+
+hour_range = 24
+
 hour_intervals = list(map(lambda i: (now - timedelta(hours=i+1), now - timedelta(hours=i)), reversed(range(hour_range))))
 in_buses_intervals = list(map(lambda interval: rows_by_interval(buses_in, interval[0], interval[1]), hour_intervals))
 out_buses_intervals = list(map(lambda interval: rows_by_interval(buses_out, interval[0], interval[1]), hour_intervals))
@@ -197,7 +229,6 @@ out_buses_intervals = list(map(lambda interval: rows_by_interval(buses_out, inte
 labels = list(map(lambda interval: f"from: {interval[0].hour} to: {interval[1].hour}",hour_intervals))
 in_medians = list(map(lambda buses: buses['delay'].median(), in_buses_intervals))
 out_medians = list(map(lambda buses: buses['delay'].median(), out_buses_intervals))
-print(out_medians)
 
 in_sizes = list(map(lambda buses: len(buses['delay'].index), in_buses_intervals))
 out_sizes = list(map(lambda buses: len(buses['delay'].index), out_buses_intervals))
@@ -214,6 +245,7 @@ rects2 = ax.bar(x + width/2, out_medians, width, label='From prague')
 ax.set_ylabel('Departure delay median [s]')
 ax.set_title(f'Departure delay median from {(now - timedelta(hours=hour_range)).hour} to {now.hour}')
 ax.set_xticks(x, labels)
+ax.figure.set_size_inches(25, 10)
 ax.legend()
 
 ax.bar_label(rects1, padding=3)
@@ -229,6 +261,8 @@ rects2 = ax.bar(x + width/2, out_sizes, width, label='From prague')
 ax.set_ylabel('Dataset size')
 ax.set_title(f'Dataset sizes from {(now - timedelta(hours=hour_range)).hour} to {now.hour}')
 ax.set_xticks(x, labels)
+
+ax.figure.set_size_inches(31.3, 10)
 ax.legend()
 
 ax.bar_label(rects1, padding=3)
