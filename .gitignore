@@ -1,6 +1,6 @@
 .env
 env
 
-notebook/secrets*
+notebook/secrets.py
 notebook/cache*
 
